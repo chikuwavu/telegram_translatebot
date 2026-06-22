@@ -1,38 +1,40 @@
 import os
 import re
 import asyncio
+import time # 追加: 再接続時の待機に使用します
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import ollama
 
-# チャット（グループ/チャンネル）ごとの翻訳モードを保持する辞書
-# 構造: { chat_id: "ja2en" または "ja2tw" }
+# チャットごとの翻訳モードを保持する辞書
+# 構造: { chat_id: "ja2en" | "ja2tw" | "ja2kr" }
 chat_modes = {}
 
-# Ollamaで実行するTranslateGemmaのモデル名
-MODEL_NAME =  "translategemma:12b"
+MODEL_NAME = "translategemma:4b"
 
 def is_japanese(text: str) -> bool:
     """
     文字列に日本語特有の文字（ひらがな・カタカナ）が含まれているか判定。
-    ※台湾華語の漢字（繁体字）と区別するため、漢字のみでの判定は除外しています。
     """
     return bool(re.search(r'[\u3040-\u309F\u30A0-\u30FF]', text))
 
 async def start_ja2en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ja2en コマンドで日本語 ⇄ 英語の相互翻訳を開始"""
     chat_id = update.effective_chat.id
     chat_modes[chat_id] = "ja2en"
-    await update.message.reply_text("🔄 **日本語 ⇄ 英語 の相互翻訳モードを有効にしました。**\nこれ以降のテキストを自動で翻訳します。")
+    await update.message.reply_text("🔄 **日本語 ⇄ 英語 の相互翻訳モードを有効にしました。**")
 
 async def start_ja2tw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ja2tw コマンドで日本語 ⇄ 台湾華語の相互翻訳を開始"""
     chat_id = update.effective_chat.id
     chat_modes[chat_id] = "ja2tw"
-    await update.message.reply_text("🔄 **日本語 ⇄ 台湾華語（繁体字） の相互翻訳モードを有効にしました。**\nこれ以降のテキストを自動で翻訳します。")
+    await update.message.reply_text("🔄 **日本語 ⇄ 台湾華語（繁体字） の相互翻訳モードを有効にしました。**")
+
+async def start_ja2kr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ja2kr コマンドで日本語 ⇄ 韓国語の相互翻訳を開始"""
+    chat_id = update.effective_chat.id
+    chat_modes[chat_id] = "ja2kr"
+    await update.message.reply_text("🔄 **日本語 ⇄ 韓国語（ハングル） の相互翻訳モードを有効にしました。**")
 
 async def stop_translation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/stop コマンドで翻訳を停止"""
     chat_id = update.effective_chat.id
     if chat_id in chat_modes:
         del chat_modes[chat_id]
@@ -41,10 +43,8 @@ async def stop_translation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("現在翻訳モードは設定されていません。")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """メッセージ受信時のハンドラー"""
     chat_id = update.effective_chat.id
     
-    # メッセージが空、または翻訳モードが設定されていないチャットの場合はスルー
     if not update.message or not update.message.text:
         return
     if chat_id not in chat_modes:
@@ -65,12 +65,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif mode == "ja2tw":
         if is_japanese(text):
             src_lang, src_code = "Japanese", "ja"
-            tgt_lang, tgt_code = "Traditional Chinese", "zh-TW" # 台湾華語を指定
+            tgt_lang, tgt_code = "Traditional Chinese", "zh-TW"
         else:
             src_lang, src_code = "Traditional Chinese", "zh-TW"
             tgt_lang, tgt_code = "Japanese", "ja"
+            
+    elif mode == "ja2kr":
+        if is_japanese(text):
+            src_lang, src_code = "Japanese", "ja"
+            tgt_lang, tgt_code = "Korean", "ko" # 韓国語を指定
+        else:
+            src_lang, src_code = "Korean", "ko"
+            tgt_lang, tgt_code = "Japanese", "ja"
 
-    # TranslateGemma用のプロンプト構築
     prompt = (
         f"You are a professional {src_lang} ({src_code}) to {tgt_lang} ({tgt_code}) translator. "
         f"Your goal is to accurately convey the meaning and nuances of the original {src_lang} text "
@@ -98,24 +105,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         print(f"Error during Ollama generation: {e}")
 
 def main() -> None:
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+    # ⚠️ トークンは必ず再発行し、ここに直接書かずに環境変数などから取得するようにしてください
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("エラー: TELEGRAM_BOT_TOKEN を設定してください。")
         return
 
-    application = Application.builder().token(TOKEN).build()
+    # 無限ループでポーリングを囲むことで、通信エラーで落ちても自動で再起動する
+    while True:
+        try:
+            # ループの中で毎回Applicationをビルドし直すことで、安全に再接続できます
+            application = Application.builder().token(TOKEN).build()
 
-    # コマンドハンドラーの登録
-    application.add_handler(CommandHandler("ja2en", start_ja2en))
-    application.add_handler(CommandHandler("ja2tw", start_ja2tw)) # 台湾語コマンドを追加
-    application.add_handler(CommandHandler("stop", stop_translation))
-    
-    # メッセージハンドラーの登録
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            application.add_handler(CommandHandler("ja2en", start_ja2en))
+            application.add_handler(CommandHandler("ja2tw", start_ja2tw))
+            application.add_handler(CommandHandler("ja2kr", start_ja2kr))
+            application.add_handler(CommandHandler("stop", stop_translation))
+            
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot is running...")
-    application.run_polling()
+            print("Bot is running...")
+            # ポーリングを開始。ネットワークエラー等の致命的エラーが起きるとここから例外が飛ぶ
+            application.run_polling()
+            
+        except Exception as e:
+            # エラーをキャッチして10秒待機後、whileループの先頭に戻って再接続
+            print(f"通信エラーまたは予期せぬエラーで停止しました。10秒後に再接続します: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
