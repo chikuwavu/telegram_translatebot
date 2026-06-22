@@ -10,7 +10,7 @@ import ollama
 # 構造: { chat_id: "ja2en" | "ja2tw" | "ja2kr" }
 chat_modes = {}
 
-MODEL_NAME = "translategemma:4b"
+MODEL_NAME = "translategemma:12b"
 
 def is_japanese(text: str) -> bool:
     """
